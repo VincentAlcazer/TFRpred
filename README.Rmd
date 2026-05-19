@@ -1,0 +1,683 @@
+---
+title: "TFR prediction using RNAseq"
+author: "Vincent Alcazer"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    theme: flatly 
+    df_print: paged
+    self_contained: true
+    number_sections: TRUE
+    code_folding: hide
+    toc: true
+    toc_float: true
+    toc_collapsed: true
+  pdf_document:
+    number_sections: yes
+editor_options:
+  chunk_output_type: console
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = "center",
+               fig.retina = 2,
+               fig.width = 10,
+			         fig.height=7,
+               cache = T,
+               cache.lazy = F,
+               echo = FALSE,
+               message = FALSE,
+               warning=FALSE,
+			         dpi=300)
+```
+
+```{r librairies}
+
+##Librairies 
+
+ library(tidyverse)
+ library(ggrepel)
+ library(gtools)
+ library(DESeq2)
+ library(BiocParallel)
+ library(doParallel)
+ library(ggrepel)
+ library(plotROC)
+ library(MetBrewer)
+library(MASS)
+ library(pROC)
+ library(survival)
+ library(survminer)
+
+
+custom_theme <- theme_bw() +
+        theme(
+        plot.title = element_text(size=20, face="bold"),
+        axis.text = element_text(size=16, color="black"), 
+        axis.title = element_text(size=18,face="bold"),
+        legend.title = element_text(size=18,face="bold"),
+        strip.text.x = element_text(size = 16, face = "bold"),
+        legend.text = element_text(size = 16),
+        legend.position = "right")
+
+
+
+```
+
+```{r Functions }
+
+create_dt <- function(x, round_tidy = F){
+  if(round_tidy == T){
+    x %>%
+       arrange(p.value) %>%
+       mutate(across(one_of("log2FC","mean_log2FC","estimate","std.error","statistic","conf.low","conf.high"), ~  round(.x, 2))) %>%
+        mutate(p.value = format.pval(p.value, digits = 3, eps = 0.0001, scientific = F) ) %>%
+       mutate(p.adj = format.pval(p.adj, digits = 3, eps = 0.0001, scientific = F) ) %>%
+      DT::datatable(.,
+                extensions = 'Buttons',
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                               lengthMenu = list(c(10,25,50,-1),
+                                                 c(10,25,50,"All"))))
+      
+      
+  } else {
+      DT::datatable(x,
+                extensions = 'Buttons',
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                               lengthMenu = list(c(10,25,50,-1),
+                                                 c(10,25,50,"All"))))
+  }
+}
+
+
+select <- dplyr::select
+
+reorder_by_frequency <- function(data, vars) {
+  data <- data %>%
+    mutate(across(all_of(vars), ~ {
+      if (is.factor(.x) || is.character(.x)) {
+        .x <- as.factor(.x)
+        levels_sorted <- names(sort(table(.x), decreasing = TRUE))
+        factor(.x, levels = levels_sorted)
+      } else {
+        .x
+      }
+    }))
+  return(data)
+}
+
+
+pvalue <- function(x, ...) {
+    # Construct vectors of data y, and groups (strata) g
+    y <- unlist(x)
+    g <- factor(rep(1:length(x), times=sapply(x, length)))
+    if (is.numeric(y)) {
+      
+      n_levels <- length(unique(g))
+      
+      if (n_levels <= 2) {
+      # Test t pour les variables continues a 2 niveaux
+      p <- t.test(y ~ g)$p.value
+    } else if (n_levels > 2) {
+      # ANOVA pour les variables continues a plus de 2 niveaux
+      p <- summary(aov(y ~ g))[[1]]$`Pr(>F)`[1]
+}
+      
+    } else {
+        # For categorical variables, perform a chi-squared test of independence
+        p <- chisq.test(table(y, g))$p.value
+    }
+    # Format the p-value, using an HTML entity for the less-than sign.
+    # The initial empty string places the output on the line below the variable label.
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
+}
+
+makeStars <- function(x){
+  stars <- c("***", "***", "**", "*", "T","")
+  vec <- c(0, 0.0001, 0.001, 0.01, 0.05, 0.1, 1)
+  i <- findInterval(x, vec)
+  stars[i]
+}
+
+cut2 <- function(x){
+  y <- quantcut(x, q=2) 
+  y <- factor(y, order= FALSE,
+              labels=c("Low", "High"))
+  return(y)
+}
+cut3 <- function(x){
+  y <- quantcut(x, q=3)
+  
+  if(nlevels(y) < 3){
+    y <- factor(y, order=F, labels =c("Low","High"))
+  } else {
+    y <- factor(y, order=F, labels =c("Low", "Intermediate", "High"))
+  }
+  
+  return(y)
+}
+cut4 <- function(x){
+  quantcut(x, q=4) %>%
+    factor(order= FALSE,
+           labels=c("Low", "Intermediate1", "Intermediate2", "High"))
+}
+
+ap <- function(x){head(x[1:5,1:5])}
+
+
+survival_simple <- function(sig,data_km, fun = NULL, title,
+                            time_var = "DFS_MONTHS",status_var="DFS_STATUS",
+                            confidence_int = F,
+                            x = "Months", x_lim = NULL, x_breaks = 12,
+                            palette = NULL, legend = "right",
+                            xlab = "Months", ylab = "Event Free Survival (%)",
+                            pval = T,
+                            pvalue_position = NULL, pvaluemeth_position = NULL
+                            ){
+  plot_list <- list()
+  formula_EFS <- as.formula(paste0("Surv(",time_var,",",status_var,")~",sig))
+  
+  surv_EFS  <- surv_fit(formula_EFS, data_km)
+  
+  EFS_legend <- data_km %>% 
+    filter(time_var != "NA", is.na(time_var) == F) %>% 
+    dplyr::select(sig) %>% unlist() %>% as.factor() %>% droplevels() %>% levels()
+  
+  if(is.null(x_lim)){
+    x_lim =c(min(data_km[,time_var]),max(data_km[,time_var]))
+  }
+  
+  if(is.null(palette)){
+    pal = met.brewer("Hiroshige",length(EFS_legend), direction = -1)
+  } else {
+    pal = palette
+  }
+ 
+    ggsurvplot(surv_EFS, fun = fun,
+                                      title=title,
+                                      ylim = c(0,1), 
+                                      #xlim = x_lim,
+                                      break.x.by = x_breaks,
+                                      ylab=ylab,
+                                      xlab=xlab,
+                                      #legend= c(0.8,0.3),
+                                      legend = legend,
+                                      font.title    = c(16, "bold", "black"),
+                                      # font.x = c(20,"bold","black"),
+                                      # font.y = c(20,"bold","black"),
+                                      # font.tickslab = c(14,"plain","black"),
+                                      legend.title = sig,
+                                      legend.labs=EFS_legend,
+                                      linetype = 1, size = 1,
+                                      # censor.size = 10,
+                                      conf.int = confidence_int,
+                                      pval = pval, pval.method = pval, 
+                                      palette = pal,
+                                      # pval.size = 6,
+                                       pval.coord = pvalue_position,
+                                      # pval.method.size = 6,
+                                       pval.method.coord = pvaluemeth_position,
+                                      risk.table = T,
+                                      risk.table.font.title = 5,
+                                      risk.table.fontsize = 5,
+                                      tables.theme = theme_cleantable(),
+                                      risk.table.y.text = FALSE,
+                                      surv.median.line = "v",
+                                      ggtheme = theme_classic(base_size = 16) +
+                                        theme(
+                                          plot.title = element_text(size=20, face="bold"),
+                                          legend.title=element_text(color = "black", face="bold"),
+                                          axis.text = element_text(size = 16, color = "black"),
+                                          axis.title = element_text(size = 18, color = "black", face="bold"))) 
+      #guides(colour = guide_legend(nrow = 2))
+    
+  
+}     
+
+
+
+
+
+
+
+```
+
+
+```{r Data loading }
+
+##### ===== External test set meta data
+
+meta_test <- read_tsv("data/meta_external_test.tsv") %>%
+  mutate(across(ends_with("date"), lubridate::dmy)) %>%
+    mutate(MR4.5_duration = abs(lubridate::interval(MR4.5_date, TKI_stop_date) %/% months(1))) %>%
+  as.data.frame()
+
+rownames(meta_test) <- meta_test$sample_id
+
+##### ===== Salmon
+salmon_tpm <- read_rds("data/TFR_salmon_TPM_external_test.rds") 
+
+all(colnames(salmon_tpm) == meta_test$sample_id)
+  
+##### ===== ENSEMBL gene correspondance (protein coding only)
+gene_corresp <- read_tsv("data/gencode_v48_proteincoding_only.tsv")
+
+```
+
+**DEVELOPMENT AND EXTERNAL VALIDATION OF A TRANSCRIPTOME-BASED MULTIVARIABLE PREDICTION MODEL FOR TREATMENT-FREE REMISSION IN CHRONIC MYELOID LEUKEMIA**  
+
+*Vincent ALCAZER, Stéphanie DULUCQ, Isabelle MOSNIER, Kaddour CHABANE, Pauline BERTIN-MOUROT, Sandrine DERRUAU, Marie BALSAT, Hélène LABUSSIERE-WALLET, Pierre SUJOBERT, François-Xavier MAHON, Gabriel ETIENNE, Franck NICOLINI, Sandrine HAYETTE*   
+
+
+[Alcazer V. et al. Journal of Clinical Oncology 2026](https://www.jco.org)
+
+
+**Purpose:** Treatment-free remission (TFR) is a major therapeutic objective in chronic myeloid leukaemia (CML). However, nearly 50% of patients relapse after tyrosine kinase inhibitor (TKI) discontinuation, and no robust predictive biomarker is currently available.  
+
+**Methods:** We profiled peripheral blood cell transcriptomes at imatinib (IMA) discontinuation in patients from the multicenter STIM2 trial (n=96) to develop a transcriptome-based model predicting TFR by 2 years. A DESEQ2-based machine learning approach was compared to classical machine learning algorithms. The signature was then externally validated in an independent real-world cohort of patients attempting IMA or nilotinib (NIL) cessation (n=70). The biological processes associated with the signature were further explored.  
+
+**Results:** We identified a 50-gene signature discriminating patients with sustained 2-year TFR from those experiencing molecular relapse (AUROC 0.83 [95% CI, 0.73–0.93] and 0.75 [95% CI, 0.55–1.00] in the training and internal validation cohorts, respectively). The discriminative performance was confirmed in the external test cohort, both as a binary predictor of 2-year TFR (AUROC 0.71 [95% CI, 0.58–0.83] overall; 0.77 [95% CI, 0.61–0.92] in IMA-treated patients) and as a time-to-event predictor (log-rank p=0.0042). The high TFR-signature group showed a higher proportion of myeloid immune cells and natural killer T-cells, with an enrichment in Hedgehog signaling, whereas the low TFR-signature group demonstrated a higher proportion of lymphoid cells with an enrichment in mTOR signaling and a trend for oxidative phosphorylation activation. T-cell receptor and immunoglobulin heavy-chain repertoire analyses showed significantly greater polyclonality in the high TFR-signature group.  
+
+**Conclusion:** These findings demonstrate that transcriptomic profiling at TKI discontinuation can predict TFR outcomes in patients with CML and provide biological insights into the mechanisms underlying sustained TFR. 
+
+
+
+# Repository presentation 
+
+This repository provides the complete code required to reproduce the figures related to signature computation and TFR prediction presented in the paper. For legal and ethical reasons, raw data from the STIM2 cohort cannot be provided, and only data from the external test cohort are publicly available.  
+
+
+# Data {.tabset .tabset-fade .tabset-pills}
+
+Data from the external test cohort are provided here:  
+      **- meta_external_test.tsv:** Meta data  
+      **- TFR_salmon_TPM_external_test.rds:** Salmon's TPM normalized count with Log2(x+1) transformation  
+
+Additional data (salmon's raw output as txi file, DESEQ2 VST normalized count, raw counts...) can be provided upon request.        
+Raw fastQ data can be found on the European Nucleotide Archive (ENA) under the accession number PRJEB111426. 
+
+
+Clinical and transcriptomic data from the STIM2 cohort originate from a regulated clinical trial and are subject to ethical, legal, and contractual restrictions related to patient consent and data protection; therefore, individual-level clinical data from STIM2 cannot be made publicly available. Access to these data may be considered upon reasonable request and subject to approval by the relevant data governance bodies, under a data transfer agreement.
+
+## Table 1 {.tabset .tabset-fade .tabset-pills}
+
+Baseline characteristics according to TFR by 2 years in the external test cohort
+
+```{r Table1 cohort }
+
+table1 <- meta_test %>% 
+  transmute(Age_at_TKI_stop, Sex, 
+            TKI = TKI_type,
+            TKI_line = TKI_line,
+            TFR_group, Sokal, ELTS,ACA, transcript_type_2,  TKI_overall_months,
+            #MR4_duration_MONTHS,
+            MR4.5_duration ,
+            cohort = "Test",follow_up)
+
+categorical_vars <- names(Filter(function(x) is.factor(x) || is.character(x), table1))
+
+table1_sorted <- reorder_by_frequency(table1, categorical_vars)
+
+
+table1::table1(~. | TFR_group, data = table1, 
+               topclass="Rtable1-zebra",
+               render.continuous=c(.="Mean (SD)", .="Median [Q1, Q3]"),
+               extra.col=list(`P-value`=pvalue))       
+     
+
+```
+
+## Factor associated with TFR {.tabset .tabset-fade .tabset-pills}
+
+Univariate cox models of baseline factors associated with TFR in the external test cohort  
+
+```{r TFR pred factors}
+
+
+###Cox models
+
+meta_test$MR4.5_duration[is.na(meta_test$MR4.5_duration)] <- meta_test$MR4_duration_MONTHS[is.na(meta_test$MR4.5_duration)] 
+
+var_to_test <- c("Age_at_TKI_stop","Sex","TKI_type", "transcript_type_2","MR4.5_duration","TKI_overall_months")
+
+formula_cox <- sapply(var_to_test, function(x) as.formula(paste('Surv(TFR_MONTHS, TFR_STATUS)~', x)))
+
+cox_models <- lapply(formula_cox, function(x){coxph(x, data = meta_test )})
+
+forestmodel::forest_model(model_list = cox_models,covariates = var_to_test,merge_models =T) + 
+  labs(title = "External test cohort (n=70)")
+
+
+
+
+```
+
+
+# DESEQ2 {.tabset .tabset-fade .tabset-pills}
+
+The raw results of the DESEQ2 bootstraps are provided in the repository (data/DESEQ2_bootstrap_salmon_pc_0.75_reslist.rds). 
+
+## Overall results  
+
+```{r Overall res, fig.width=12 }
+
+res_list <- read_rds(paste0("data/DESEQ2_bootstrap_salmon_pc_0.75_reslist.rds"))
+
+res_df <- res_list %>%
+  bind_rows() %>%
+  ungroup() %>%
+  as.data.frame()
+
+
+n_boot = 500
+padj_cutoff = 0.1
+FC_cutoff = 0
+min_pres = 0.5
+min_presentation=min_pres*n_boot
+
+signature_df <-  res_df %>% 
+    dplyr::filter(padj <= padj_cutoff & abs(log2FoldChange) >= FC_cutoff) %>%
+    group_by(gene_id) %>%
+    summarise(n = n(),
+              mean_log2FC = mean(log2FoldChange),
+              mean_padj = mean(padj),
+              best_log2FC = if_else(max(log2FoldChange) > abs(min(log2FoldChange)), max(log2FoldChange), min(log2FoldChange)),
+              best_padj = min(padj)
+              ) %>%
+    arrange(desc(n)) %>%
+    filter(n >= min_presentation) %>%
+  left_join(gene_corresp)
+
+
+### Overall RES 
+Overall_DESEQ <- res_df %>%
+    dplyr::filter(padj <= padj_cutoff & abs(log2FoldChange) >= FC_cutoff) %>%
+    group_by(gene_id) %>%
+    summarise(n = n(),
+              mean_log2FC = mean(log2FoldChange),
+              mean_padj = mean(padj),
+              best_log2FC = if_else(max(log2FoldChange) > abs(min(log2FoldChange)), max(log2FoldChange), min(log2FoldChange)),
+              best_padj = min(padj),
+              worse_log2FC = min(abs(log2FoldChange)),
+              worse_padj = max(padj)
+              ) %>%
+    arrange(desc(n)) %>%
+  mutate(tot_models = case_when(n < 0.10*n_boot ~ "<10%",
+                                (n >= 0.10*n_boot & n < 0.25*n_boot) ~ "10-25%",
+                             (n >= 0.25*n_boot & n < 0.50*n_boot) ~ "25-50%",
+                             (n >= 0.50*n_boot & n < 0.75*n_boot) ~ "50-75%",
+                             n >= 0.75*n_boot ~ ">75%"
+  )
+  )
+Overall_DESEQ$tot_models <- factor(Overall_DESEQ$tot_models, levels = c("<10%","10-25%","25-50%","50-75%",">75%"))
+
+
+Overall_DESEQ %>%
+  ggplot(aes(x = n, y = -log10(mean_padj), color = n)) +
+  geom_point(size = 2) +
+  scale_y_log10() +
+  geom_vline(xintercept = min_presentation, linetype = 2 ) +
+  geom_hline(yintercept = -log10(padj_cutoff), linetype = 2 ) +
+  scale_color_met_c("Hiroshige",-1) +
+  scale_size_manual(values =c(1,2,4,6,10)) +
+  custom_theme +
+  labs(title = "Overall merged DESEQ results", y = "-log10(FDR)", x = "Total models (n)")
+
+
+Overall_DESEQ %>%
+  #filter(mean_padj > 1e-10) %>%
+  ggplot(aes(x = n, y = -log10(best_padj), color = n)) +
+  geom_point(size = 2) +
+  scale_y_log10() +
+  geom_vline(xintercept = min_presentation, linetype = 2 ) +
+  geom_hline(yintercept = -log10(padj_cutoff), linetype = 2 ) +
+  scale_color_met_c("Hiroshige",-1) +
+  scale_size_manual(values =c(1,2,4,6,10)) +
+  custom_theme +
+  labs(title = "Best individual DESEQ results", y = "-log10(FDR)", x = "Total models (n)")
+
+
+### Best param selection
+
+conf_df <- res_df %>%
+     group_by(gene_id) %>%
+    summarise(n = n(),
+              mean_log2FC = mean(log2FoldChange),
+              mean_padj = mean(padj),
+              best_padh = min(padj)) %>%
+    arrange(desc(n))
+
+### Load conf df with train/valid/test data
+conf_df <- readRDS("data/bootstrap_conf_df.rds")
+
+conf_df %>%
+  filter(data %in% c("Train","Validation")) %>%
+  ggplot(aes(x = n_genes, y = median, group = data, color = data)) +
+  geom_point() +
+  geom_line(size = 1.2) +
+  custom_theme +
+  labs(title = "Median AUROC across bootstraps", y = "AUROC", x = "Features (n)",
+       color = "Dataset") +
+  scale_color_met_d("Hiroshige", direction = 1) +
+  geom_vline(xintercept = 50, linetype = 2) +
+  ylim(0,1)
+
+
+```
+
+## Final model 
+
+**Filters:**   
+n=500 bootstraps  
+FDR < 0.1  
+FC_cutoff: 0    
+Min presentation: 50% of overall models    
+
+```{r Best model }
+
+signature_df <-  res_df %>% 
+    dplyr::filter(padj <= 0.1 ) %>%
+    group_by(gene_id) %>%
+    summarise(n = n(),
+              mean_log2FC = mean(log2FoldChange),
+              mean_padj = mean(padj),
+              best_log2FC = if_else(max(log2FoldChange) > abs(min(log2FoldChange)), max(log2FoldChange), min(log2FoldChange)),
+              best_padj = min(padj)
+              ) %>%
+    arrange(desc(n)) %>%
+  slice_head(n=50) %>% 
+    #filter(n >= min_presentation) %>%
+  left_join(gene_corresp)
+
+### show selected genes 
+Overall_DESEQ %>%
+  mutate(select_genes = if_else(gene_id %in% signature_df$gene_id, T, F)) %>%
+  #filter(mean_padj > 1e-10) %>%
+  ggplot(aes(x = n, y = -log10(mean_padj), color = select_genes)) +
+  geom_point(size = 2) +
+  scale_y_log10() +
+  geom_vline(xintercept = min_presentation, linetype = 2 ) +
+  geom_hline(yintercept = -log10(padj_cutoff), linetype = 2 ) +
+  scale_color_met_d("Hiroshige",-1) +
+  scale_size_manual(values =c(1,2,4,6,10)) +
+  custom_theme +
+  labs(title = "", y = "-log10(FDR)", x = "Bootstrap iterations (n)", color = "Selected gene") +
+  theme(legend.position = "top")
+
+
+signature_df %>% 
+  #left_join(gene_corresp) %>%
+  mutate(across(c(2,5), ~ round(.,2))) %>%
+  mutate(mean_padj = format.pval(mean_padj, digits = 3, eps = 0.0001, scientific = F) ) %>%
+ mutate(best_padj = format.pval(best_padj, digits = 3, eps = 0.0001, scientific = F) ) %>%
+  create_dt
+
+
+### === Compute signature in the external test set 
+
+test_score <- salmon_tpm[signature_df$gene_id,meta_test$sample_id]
+
+stopifnot(all(rownames(meta_test) == colnames(test_score)))
+
+test_pred <- data.frame(
+  Response =  meta_test$TFR_STATUS,
+  Prediction = colSums(test_score * signature_df$mean_log2FC)
+)
+
+### IMA pts only
+ima_samples <- meta_test %>% filter(TKI_type == "IMA") %>% distinct(sample_id) %>% unlist() %>% as.character()
+
+test_IMA <- data.frame(
+    Response =  meta_test[ima_samples,]$TFR_STATUS,
+  Prediction = colSums(test_score[,ima_samples] * signature_df$mean_log2FC)
+)
+
+### NIL pts only
+nil_samples <- meta_test %>% filter(TKI_type == "NIL") %>% distinct(sample_id) %>% unlist() %>% as.character()
+
+test_NIL <- data.frame(
+    Response =  meta_test[nil_samples,]$TFR_STATUS,
+  Prediction = colSums(test_score[,nil_samples] * signature_df$mean_log2FC)
+)
+
+
+
+
+
+```
+
+# TFR prediction {.tabset .tabset-fade .tabset-pills}
+
+## ROC curves
+ 
+```{r ROC Curves }
+
+
+### ROC computation
+roc_df_STIM2 <- read_tsv("data/conf_df_STIM2.tsv")
+
+
+conf_df <- rbind(roc_df_STIM2,
+data.frame(ci.auc(roc(test_pred$Response, test_pred$Prediction))) %>%
+      mutate(conf.int = c("low","median","high"),
+             data = "Test") %>%
+    select(AUC = 1, everything()) %>%
+      pivot_wider(names_from = conf.int, values_from = AUC) %>%
+      mutate(
+             n_genes = length(unique(signature_df$gene_id)),
+             padj = padj_cutoff,
+             min_pres = min_presentation),
+data.frame(ci.auc(roc(test_IMA$Response, test_IMA$Prediction))) %>%
+      mutate(conf.int = c("low","median","high"),
+             data = "Test (IMA)") %>%
+    select(AUC = 1, everything()) %>%
+      pivot_wider(names_from = conf.int, values_from = AUC) %>%
+      mutate(
+             n_genes = length(unique(signature_df$gene_id)),
+             padj = padj_cutoff,
+             min_pres = min_presentation),
+data.frame(ci.auc(roc(test_NIL$Response, test_NIL$Prediction))) %>%
+      mutate(conf.int = c("low","median","high"),
+             data = "Test (NIL)") %>%
+    select(AUC = 1, everything()) %>%
+      pivot_wider(names_from = conf.int, values_from = AUC) %>%
+      mutate(
+             n_genes = length(unique(signature_df$gene_id)),
+             padj = padj_cutoff,
+             min_pres = min_presentation)
+
+
+) %>%
+    mutate(across(c(low, median, high), ~ as.numeric(.x)))
+
+conf_df$data <- factor(conf_df$data, levels = c("Train","Validation","Test","Test (IMA)", "Test (NIL)"))
+
+conf_df %>%
+    ggplot(aes(x = fct_rev(data), y = median, color = data)) +
+    geom_pointrange(aes(ymin = low, ymax = high),
+                  size = 1,      # épaisseur de la ligne
+                  linewidth = 1.2,
+                  fatten = 2.5) +  # taille du point central
+  geom_text(aes(label = paste0(round(median, 2), " [",round(low,2),"-",round(high,2),"]")),size = 6, nudge_x =0.2) +
+  geom_line(size = 1) +
+  ylim(0,1) +
+  coord_flip() +
+  scale_color_met_d("Hiroshige") +
+  custom_theme +
+  labs(title = "TFR prediction (2years)", y = "AUROC [95%CI]", x = "")
+
+
+
+
+```
+
+## Kaplan Meier 
+
+```{r KM curves }
+
+###Survival 
+test_pred_km <- test_pred %>%
+  rownames_to_column("sample_id") %>%
+  left_join(meta_test)
+
+test_pred_km <- test_pred_km %>%
+    mutate(Signature_cut2 = cut2(Prediction))
+
+survival_simple("Signature_cut2", data_km = test_pred_km,
+                time_var = "TFR_MONTHS", status_var = "TFR_STATUS",
+                title = "External test set", 
+                pvaluemeth_position = c(7.5,0.25),
+                pvalue_position = c(7,0.15),
+                ylab = "Treatment-free Survival (%)", xlab = "Months since TKI cessation") 
+
+```
+
+## Cox model 
+
+Multivariate cox model computed on the external test set
+
+```{r Cox model }
+
+
+cox_df_test <- test_pred_km %>%
+  transmute(
+    `TKI duration (months)`   = TKI_overall_months,
+    `MR4.5 duration (months)` = MR4.5_duration,
+    `Transcript type`         = transcript_type_2,
+    `TFR signature`           = Signature_cut2,
+    TKI = TKI_type,
+    `TKI line` =  TKI_line,
+    TFR_MONTHS,
+    TFR_STATUS
+  )
+
+
+fit <- coxph(
+  Surv(TFR_MONTHS, TFR_STATUS) ~
+    `TKI duration (months)` +
+    `MR4.5 duration (months)` +
+    `Transcript type` +
+    `TFR signature` +
+    TKI + 
+  `TKI line`,
+  data = cox_df_test
+)
+
+
+forestmodel::forest_model(fit) +
+  labs(title = "Multivariate cox model - External test cohort")
+
+```
+
+
+# Conclusion
+
+<!-- Finir par le code suivant pour lister les versions des libraries -->
+
+```{r echo=FALSE}
+sessionInfo()
+```
+
