@@ -2,21 +2,8 @@
 title: "TFR prediction using RNAseq"
 author: "Vincent Alcazer"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
-output:
-  html_document:
-    theme: flatly 
-    df_print: paged
-    self_contained: true
-    number_sections: TRUE
-    code_folding: hide
-    toc: true
-    toc_float: true
-    toc_collapsed: true
-  pdf_document:
-    number_sections: yes
-editor_options:
-  chunk_output_type: console
-urlcolor: blue
+output: github_document
+always_allow_html: true
 ---
 
 ```{r setup, include=FALSE}
@@ -49,6 +36,7 @@ library(MASS)
  library(pROC)
  library(survival)
  library(survminer)
+library(webshot2)
 
 
 custom_theme <- theme_bw() +
@@ -364,7 +352,7 @@ The raw results of the DESEQ2 bootstraps are provided in the repository (data/DE
 
 ```{r Overall res, fig.width=12 }
 
-res_list <- read_rds(paste0("data/DESEQ2_bootstrap_salmon_pc_0.75_reslist.rds"))
+res_list <- read_rds("data/DESEQ2_bootstrap_salmon_pc_0.75_reslist_FDR0.1.rds")
 
 res_df <- res_list %>%
   bind_rows() %>%
