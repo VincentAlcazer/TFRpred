@@ -278,7 +278,7 @@ gene_corresp <- read_tsv("data/gencode_v48_proteincoding_only.tsv")
 This repository provides the complete code required to reproduce the figures related to signature computation and TFR prediction presented in the paper. For legal and ethical reasons, raw data from the STIM2 cohort cannot be provided, and only data from the external test cohort are publicly available.  
 
 
-# Data {.tabset .tabset-fade .tabset-pills}
+# Data 
 
 Data from the external test cohort are provided here:  
       **- meta_external_test.tsv:** Meta data  
@@ -290,7 +290,7 @@ Raw fastQ data can be found on the European Nucleotide Archive (ENA) under the a
 
 Clinical and transcriptomic data from the STIM2 cohort originate from a regulated clinical trial and are subject to ethical, legal, and contractual restrictions related to patient consent and data protection; therefore, individual-level clinical data from STIM2 cannot be made publicly available. Access to these data may be considered upon reasonable request and subject to approval by the relevant data governance bodies, under a data transfer agreement.
 
-## Table 1 {.tabset .tabset-fade .tabset-pills}
+## Table 1 
 
 Baseline characteristics according to TFR by 2 years in the external test cohort
 
@@ -318,7 +318,7 @@ table1::table1(~. | TFR_group, data = table1,
 
 ```
 
-## Factor associated with TFR {.tabset .tabset-fade .tabset-pills}
+## Factor associated with TFR 
 
 Univariate cox models of baseline factors associated with TFR in the external test cohort  
 
@@ -344,7 +344,7 @@ forestmodel::forest_model(model_list = cox_models,covariates = var_to_test,merge
 ```
 
 
-# DESEQ2 {.tabset .tabset-fade .tabset-pills}
+# DESEQ2 
 
 The raw results of the DESEQ2 bootstraps are provided in the repository (data/DESEQ2_bootstrap_salmon_pc_0.75_reslist.rds). 
 
@@ -537,7 +537,7 @@ test_NIL <- data.frame(
 
 ```
 
-# TFR prediction {.tabset .tabset-fade .tabset-pills}
+# TFR prediction 
 
 ## ROC curves
  
