@@ -496,12 +496,12 @@ Overall_DESEQ %>%
   theme(legend.position = "top")
 
 
-signature_df %>% 
-  #left_join(gene_corresp) %>%
-  mutate(across(c(2,5), ~ round(.,2))) %>%
-  mutate(mean_padj = format.pval(mean_padj, digits = 3, eps = 0.0001, scientific = F) ) %>%
- mutate(best_padj = format.pval(best_padj, digits = 3, eps = 0.0001, scientific = F) ) %>%
-  create_dt
+# signature_df %>% 
+#   #left_join(gene_corresp) %>%
+#   mutate(across(c(2,5), ~ round(.,2))) %>%
+#   mutate(mean_padj = format.pval(mean_padj, digits = 3, eps = 0.0001, scientific = F) ) %>%
+#  mutate(best_padj = format.pval(best_padj, digits = 3, eps = 0.0001, scientific = F) ) %>%
+#   create_dt
 
 
 ### === Compute signature in the external test set 
